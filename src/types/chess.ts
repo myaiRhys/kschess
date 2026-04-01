@@ -29,6 +29,9 @@ export interface PromotionPending {
   to: Position;
 }
 
+export type GameMode = 'local' | 'cpu';
+export type Difficulty = 'easy' | 'medium' | 'hard';
+
 export interface GameState {
   board: Board;
   turn: PieceColor;
@@ -42,9 +45,15 @@ export interface GameState {
   castlingRights: CastlingRights;
   boardFlipped: boolean;
   promotionPending: PromotionPending | null;
+  mode: GameMode;
+  difficulty: Difficulty;
+  cpuColor: PieceColor;
+  cpuThinking: boolean;
 }
 
 export type GameAction =
   | { type: 'SELECT_SQUARE'; position: Position }
   | { type: 'PROMOTE'; pieceType: PieceType }
-  | { type: 'NEW_GAME' };
+  | { type: 'NEW_GAME'; mode?: GameMode; difficulty?: Difficulty }
+  | { type: 'CPU_MOVE'; from: Position; to: Position; promotion?: PieceType }
+  | { type: 'SET_CPU_THINKING'; thinking: boolean };

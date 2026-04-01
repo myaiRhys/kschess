@@ -2,6 +2,8 @@ import type {
   GameState,
   GameAction,
   Position,
+  GameMode,
+  Difficulty,
 } from '../types/chess';
 import {
   createInitialBoard,
@@ -13,7 +15,7 @@ import {
   opponent,
 } from './chess';
 
-export function createInitialState(): GameState {
+export function createInitialState(mode: GameMode = 'local', difficulty: Difficulty = 'medium'): GameState {
   return {
     board: createInitialBoard(),
     turn: 'white',
@@ -27,13 +29,17 @@ export function createInitialState(): GameState {
     castlingRights: { wK: true, wQ: true, bK: true, bQ: true },
     boardFlipped: false,
     promotionPending: null,
+    mode,
+    difficulty,
+    cpuColor: 'black',
+    cpuThinking: false,
   };
 }
 
 export function gameReducer(state: GameState, action: GameAction): GameState {
   switch (action.type) {
     case 'NEW_GAME':
-      return createInitialState();
+      return createInitialState(action.mode ?? state.mode, action.difficulty ?? state.difficulty);
 
     case 'PROMOTE':
       return handlePromotion(state, action.pieceType);
@@ -41,14 +47,23 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     case 'SELECT_SQUARE':
       return handleSquareSelect(state, action.position);
 
+    case 'CPU_MOVE':
+      return handleCpuMove(state, action.from, action.to, action.promotion);
+
+    case 'SET_CPU_THINKING':
+      return { ...state, cpuThinking: action.thinking };
+
     default:
       return state;
   }
 }
 
 function handleSquareSelect(state: GameState, position: Position): GameState {
-  // Don't allow interaction during promotion or after game over
+  // Don't allow interaction during promotion, after game over, or during CPU turn
   if (state.promotionPending || state.status === 'checkmate' || state.status === 'stalemate') {
+    return state;
+  }
+  if (state.mode === 'cpu' && state.turn === state.cpuColor) {
     return state;
   }
 
@@ -80,6 +95,36 @@ function handleSquareSelect(state: GameState, position: Position): GameState {
   }
 
   return state;
+}
+
+function handleCpuMove(
+  state: GameState,
+  from: Position,
+  to: Position,
+  promotion?: import('../types/chess').PieceType,
+): GameState {
+  if (promotion) {
+    const result = executeMove(state.board, from, to, state.enPassantTarget, state.castlingRights, promotion);
+    return {
+      ...finishMove(state, result.board, result.captured, result.enPassantTarget, result.castlingRights, result.notation),
+      cpuThinking: false,
+    };
+  }
+
+  const result = executeMove(state.board, from, to, state.enPassantTarget, state.castlingRights);
+  if (result.isPromotion) {
+    // CPU always promotes to queen (handled by cpuPlayer, but safety fallback)
+    const promoResult = executeMove(state.board, from, to, state.enPassantTarget, state.castlingRights, 'queen');
+    return {
+      ...finishMove(state, promoResult.board, promoResult.captured, promoResult.enPassantTarget, promoResult.castlingRights, promoResult.notation),
+      cpuThinking: false,
+    };
+  }
+
+  return {
+    ...finishMove(state, result.board, result.captured, result.enPassantTarget, result.castlingRights, result.notation),
+    cpuThinking: false,
+  };
 }
 
 function performMove(state: GameState, from: Position, to: Position): GameState {
@@ -144,6 +189,9 @@ function finishMove(
     status = 'check';
   }
 
+  // In CPU mode, don't flip the board
+  const shouldFlip = state.mode === 'local' ? nextTurn === 'black' : false;
+
   return {
     ...state,
     board,
@@ -156,7 +204,7 @@ function finishMove(
     capturedPieces,
     enPassantTarget,
     castlingRights,
-    boardFlipped: nextTurn === 'black',
+    boardFlipped: shouldFlip,
     promotionPending: null,
   };
 }

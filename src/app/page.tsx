@@ -1,16 +1,60 @@
 'use client';
 
-import { useReducer } from 'react';
+import { useReducer, useEffect, useCallback } from 'react';
 import { gameReducer, createInitialState } from '../lib/gameReducer';
+import { findBestMove } from '../lib/cpuPlayer';
 import Board from '../components/Board';
 import MoveHistory from '../components/MoveHistory';
 import CapturedPieces from '../components/CapturedPieces';
 import GameStatus from '../components/GameStatus';
 import PromotionModal from '../components/PromotionModal';
 import GameOverModal from '../components/GameOverModal';
+import ModeSelect from '../components/ModeSelect';
 
 export default function Home() {
-  const [state, dispatch] = useReducer(gameReducer, null, createInitialState);
+  const [state, dispatch] = useReducer(gameReducer, null, () => createInitialState());
+
+  // CPU move logic
+  const doCpuMove = useCallback(() => {
+    if (
+      state.mode !== 'cpu' ||
+      state.turn !== state.cpuColor ||
+      state.status === 'checkmate' ||
+      state.status === 'stalemate' ||
+      state.promotionPending
+    ) {
+      return;
+    }
+
+    dispatch({ type: 'SET_CPU_THINKING', thinking: true });
+
+    // Use setTimeout to let UI update with "thinking" state before blocking
+    setTimeout(() => {
+      const move = findBestMove(
+        state.board,
+        state.cpuColor,
+        state.enPassantTarget,
+        state.castlingRights,
+        state.difficulty,
+      );
+
+      if (move) {
+        dispatch({
+          type: 'CPU_MOVE',
+          from: move.from,
+          to: move.to,
+          promotion: move.promotion,
+        });
+      }
+    }, 300);
+  }, [state.mode, state.turn, state.cpuColor, state.status, state.promotionPending,
+      state.board, state.enPassantTarget, state.castlingRights, state.difficulty]);
+
+  useEffect(() => {
+    doCpuMove();
+  }, [doCpuMove]);
+
+  const subtitle = state.mode === 'cpu' ? 'You vs CPU' : 'Local two-player chess';
 
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-4 py-6 sm:py-8">
@@ -19,7 +63,7 @@ export default function Home() {
         <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
           KS Chess
         </h1>
-        <p className="text-xs sm:text-sm text-slate-400 mt-1">Local two-player chess</p>
+        <p className="text-xs sm:text-sm text-slate-400 mt-1">{subtitle}</p>
       </div>
 
       {/* Main layout */}
@@ -41,13 +85,13 @@ export default function Home() {
           />
 
           {/* Game status */}
-          <GameStatus status={state.status} turn={state.turn} />
+          <GameStatus status={state.status} turn={state.turn} cpuThinking={state.cpuThinking} mode={state.mode} />
         </div>
 
         {/* Side panel */}
         <div className="w-full lg:w-56 flex flex-col gap-3">
+          <ModeSelect mode={state.mode} difficulty={state.difficulty} dispatch={dispatch} />
           <MoveHistory moves={state.moves} />
-
           <button
             onClick={() => dispatch({ type: 'NEW_GAME' })}
             className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium rounded-lg border border-slate-600 transition-colors active:scale-[0.98]"
