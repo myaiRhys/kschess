@@ -1,0 +1,374 @@
+<title>Puddle Jump</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&display=swap">
+<style>
+  /* Layout: one full-screen canvas world, a big start button over it. Single bright cartoon look, both themes. */
+  :root {
+    --sky: #8fd3ff;
+    --grass: #7cc742;
+    --pink: #f7a1c4;
+    --mud: #8a5a2b;
+    --ink: #3a2a35;
+    --cream: #fffaf2;
+    --display: "Baloo 2", "Comic Sans MS", "Chalkboard SE", system-ui, sans-serif;
+  }
+  html, body { height: 100%; }
+  body { background: var(--sky); color: var(--ink); overflow: hidden; font-family: var(--display); touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #start {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+    background: rgba(143, 211, 255, 0.55);
+  }
+  #start[hidden] { display: none; }
+  #start h1 { margin: 0; font-size: clamp(44px, 11vw, 96px); line-height: 1; color: var(--cream); text-shadow: 0 5px 0 var(--mud), 0 0 2px var(--ink); text-align: center; text-wrap: balance; }
+  #play {
+    font-family: var(--display); font-weight: 800; font-size: clamp(32px, 8vw, 56px);
+    padding: 0.35em 1.2em; border: 6px solid var(--cream); border-radius: 999px;
+    background: var(--pink); color: var(--ink); box-shadow: 0 8px 0 #c76c95; cursor: pointer;
+    animation: bob 1.2s ease-in-out infinite;
+  }
+  #play:focus-visible { outline: 5px dashed var(--ink); outline-offset: 6px; }
+  #play:active { transform: translateY(6px); box-shadow: 0 2px 0 #c76c95; }
+  @keyframes bob { 50% { transform: scale(1.06); } }
+  @media (prefers-reduced-motion: reduce) { #play { animation: none; } }
+</style>
+
+<canvas id="c" aria-label="A piglet in a yellow raincoat jumping in muddy puddles"></canvas>
+<div id="start">
+  <h1>Puddle Jump!</h1>
+  <button id="play" type="button">Press SPACE!</button>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, U = 60, groundY = 0;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---------- sound ----------
+  let ac = null;
+  function audio() {
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { ac = null; } }
+    if (ac && ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+  function tone(type, f0, f1, dur, vol, delay = 0, filt = 0) {
+    const a = audio(); if (!a) return;
+    const t = a.currentTime + delay;
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    let node = o;
+    if (filt) { const lp = a.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = filt; o.connect(lp); node = lp; }
+    node.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.05);
+  }
+  function oink() { tone('sawtooth', 320, 170, 0.16, 0.35, 0, 1100); tone('sawtooth', 360, 190, 0.18, 0.35, 0.2, 1100); }
+  function boing() { tone('sine', 260, 640, 0.25, 0.3); }
+  function splashSound() {
+    const a = audio(); if (!a) return;
+    const len = a.sampleRate * 0.5, buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+    const s = a.createBufferSource(); s.buffer = buf;
+    const bp = a.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 700; bp.Q.value = 0.8;
+    const g = a.createGain(); g.gain.value = 0.9;
+    s.connect(bp); bp.connect(g); g.connect(a.destination); s.start();
+    tone('sine', 500, 120, 0.3, 0.25);
+  }
+  function tada() { [523, 659, 784, 1046].forEach((f, i) => tone('triangle', f, f, 0.35, 0.25, i * 0.12)); }
+  function say(text) {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.pitch = 1.6; u.rate = 0.95; u.volume = 1;
+      speechSynthesis.speak(u);
+    } catch (e) {}
+  }
+  const WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
+
+  // ---------- world ----------
+  const pig = { x: 0, y: 0, fx: 0, fy: 0, tx: 0, ty: 0, t: 1, jumping: false, squash: 0, blink: 0, happy: 0, mud: [], target: null };
+  let puddles = [], drops = [], confetti = [], clouds = [], score = 0, rainbow = 0, started = false, sunSpin = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    U = Math.max(34, Math.min(W / 9, H / 7.5, 80));
+    groundY = H * 0.58;
+    if (!pig.x) { pig.x = W * 0.5; pig.y = H * 0.8; }
+    pig.x = Math.min(Math.max(pig.x, U), W - U); pig.y = Math.min(Math.max(pig.y, groundY + U), H - U * 0.3);
+    puddles.forEach(p => { p.x = Math.min(p.x, W - U); p.y = Math.min(Math.max(p.y, groundY + U * 0.8), H - U * 0.4); });
+    if (!clouds.length) for (let i = 0; i < 4; i++) clouds.push({ x: Math.random() * W, y: H * (0.08 + Math.random() * 0.2), s: 0.7 + Math.random() * 0.6, v: 6 + Math.random() * 10 });
+  }
+
+  function newPuddle() {
+    for (let tries = 0; tries < 40; tries++) {
+      const x = U * 1.2 + Math.random() * (W - U * 2.4);
+      const y = groundY + U * 1.1 + Math.random() * (H - groundY - U * 1.6);
+      const ok = Math.hypot(x - pig.x, (y - pig.y) * 1.6) > U * 2.2 && puddles.every(p => Math.hypot(x - p.x, (y - p.y) * 1.6) > U * 2.6);
+      if (ok) return { x, y, r: U * (1.1 + Math.random() * 0.4), grow: 0, gone: false, fade: 1, wob: Math.random() * 6 };
+    }
+    return null;
+  }
+  function fillPuddles() { while (puddles.filter(p => !p.gone).length < 3) { const p = newPuddle(); if (!p) break; puddles.push(p); } }
+
+  // ---------- input ----------
+  function hitPig(x, y) { return Math.hypot(x - pig.x, y - (pig.y - U * 1.5)) < U * 1.3; }
+  function onTap(e) {
+    if (!started) return;
+    const r = cv.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    audio();
+    if (pig.jumping) return;
+    if (hitPig(x, y)) { oink(); say('Oink oink!'); pig.happy = 1; jumpTo(pig.x, pig.y, null, 0.7); return; }
+    const p = puddles.find(p => !p.gone && Math.hypot((x - p.x) / p.r, (y - p.y) / (p.r * 0.45)) < 1.35);
+    if (p) { jumpTo(p.x, p.y, p, 1); return; }
+    if (x > W * 0.78 && y < H * 0.3) { sunSpin = 1; tone('triangle', 880, 1320, 0.3, 0.2); say('Hello sun!'); return; }
+    if (y > groundY + U * 0.6) { jumpTo(x, Math.min(y, H - U * 0.3), null, 0.6); }
+  }
+  cv.addEventListener('pointerdown', onTap);
+
+  // One button: SPACE hops to the nearest puddle
+  function press() {
+    audio();
+    if (!started) { begin(); return; }
+    if (pig.jumping) return;
+    const live = puddles.filter(p => !p.gone && p.grow > 0.5);
+    if (!live.length) { oink(); pig.happy = 1; jumpTo(pig.x, pig.y, null, 0.7); return; }
+    live.sort((a, b) => Math.hypot(a.x - pig.x, a.y - pig.y) - Math.hypot(b.x - pig.x, b.y - pig.y));
+    jumpTo(live[0].x, live[0].y, live[0], 1);
+  }
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (!e.repeat) press(); }
+  });
+
+  function jumpTo(x, y, target, height) {
+    pig.fx = pig.x; pig.fy = pig.y; pig.tx = x; pig.ty = y; pig.t = 0; pig.jumping = true; pig.target = target; pig.jh = height;
+    boing();
+  }
+
+  function land() {
+    pig.jumping = false; pig.squash = 1;
+    const p = pig.target;
+    if (!p) return;
+    p.gone = true;
+    score++;
+    splashSound();
+    pig.happy = 1.4;
+    for (let i = 0; i < 26; i++) {
+      const a = Math.PI + Math.random() * Math.PI, sp = U * (3 + Math.random() * 5);
+      drops.push({ x: p.x, y: p.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 1.3, r: U * (0.06 + Math.random() * 0.1), life: 1 });
+    }
+    if (pig.mud.length < 14) {
+      for (let i = 0; i < 2; i++) pig.mud.push({ x: (Math.random() - 0.5) * 1.4, y: -0.4 - Math.random() * 2.4, r: 0.08 + Math.random() * 0.1 });
+    }
+    const word = score <= 10 ? WORDS[score - 1] : String(score);
+    if (score % 5 === 0) {
+      rainbow = 1; tada(); say(word + '! Hooray! Muddy puddles!');
+      for (let i = 0; i < 60; i++) confetti.push({ x: Math.random() * W, y: -Math.random() * H * 0.4, vy: U * (1.5 + Math.random() * 2), vx: (Math.random() - 0.5) * U, rot: Math.random() * 6, c: ['#ff6b6b', '#ffd93d', '#6bcB77', '#4d96ff', '#f7a1c4'][i % 5], life: 1 });
+    } else {
+      say(word + '! Splash!');
+    }
+    setTimeout(fillPuddles, 700);
+  }
+
+  // ---------- drawing ----------
+  function ell(x, y, rx, ry, fill, rot = 0) { ctx.beginPath(); ctx.ellipse(x, y, Math.max(rx, 0.1), Math.max(ry, 0.1), rot, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); }
+
+  function drawSky(dt) {
+    const g = ctx.createLinearGradient(0, 0, 0, groundY);
+    g.addColorStop(0, '#5fbef5'); g.addColorStop(1, '#c4ecff');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // sun
+    const sx = W * 0.86, sy = H * 0.14, sr = U * 0.8;
+    sunSpin = Math.max(0, sunSpin - dt * 0.6);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(performance.now() / 4000 + sunSpin * 4);
+    ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = U * 0.14; ctx.lineCap = 'round';
+    for (let i = 0; i < 12; i++) { ctx.rotate(Math.PI / 6); ctx.beginPath(); ctx.moveTo(sr * 1.25, 0); ctx.lineTo(sr * 1.6, 0); ctx.stroke(); }
+    ctx.restore();
+    ell(sx, sy, sr, sr, '#ffd23f');
+    ell(sx - sr * 0.35, sy - sr * 0.1, sr * 0.09, sr * 0.12, '#3a2a35');
+    ell(sx + sr * 0.35, sy - sr * 0.1, sr * 0.09, sr * 0.12, '#3a2a35');
+    ctx.beginPath(); ctx.arc(sx, sy + sr * 0.1, sr * 0.45, 0.15 * Math.PI, 0.85 * Math.PI); ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = U * 0.07; ctx.stroke();
+    // clouds
+    clouds.forEach(c => {
+      c.x += c.v * dt; if (c.x - U * 3 > W) c.x = -U * 3;
+      const s = U * c.s;
+      ['#ffffff'].forEach(col => { ell(c.x, c.y, s * 1.1, s * 0.6, col); ell(c.x - s * 0.9, c.y + s * 0.15, s * 0.7, s * 0.45, col); ell(c.x + s * 0.9, c.y + s * 0.15, s * 0.75, s * 0.45, col); });
+    });
+    // rainbow
+    if (rainbow > 0) {
+      rainbow = Math.max(0, rainbow - dt * 0.18);
+      ctx.save(); ctx.globalAlpha = Math.min(1, rainbow * 3);
+      const cols = ['#ff5a5a', '#ff9f43', '#ffd93d', '#6bcb77', '#4d96ff', '#9b6bff'];
+      cols.forEach((c, i) => { ctx.beginPath(); ctx.arc(W / 2, groundY + U, Math.min(W * 0.45, H * 0.5) - i * U * 0.22, Math.PI, 0); ctx.strokeStyle = c; ctx.lineWidth = U * 0.23; ctx.stroke(); });
+      ctx.restore();
+    }
+  }
+
+  function drawLand() {
+    // back hill with little house and tree
+    ctx.fillStyle = '#9bd45a';
+    ctx.beginPath(); ctx.moveTo(0, groundY + U * 0.4);
+    ctx.quadraticCurveTo(W * 0.25, groundY - U * 2.6, W * 0.55, groundY - U * 0.2);
+    ctx.quadraticCurveTo(W * 0.8, groundY - U * 1.6, W, groundY);
+    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.fill();
+    // house on hill
+    const hx = W * 0.25, hy = groundY - U * 1.35, hs = U * 0.8;
+    ctx.fillStyle = '#f2d16b'; ctx.fillRect(hx - hs, hy - hs * 1.2, hs * 2, hs * 1.2);
+    ctx.fillStyle = '#e8574f'; ctx.beginPath(); ctx.moveTo(hx - hs * 1.25, hy - hs * 1.15); ctx.lineTo(hx, hy - hs * 2.2); ctx.lineTo(hx + hs * 1.25, hy - hs * 1.15); ctx.fill();
+    ctx.fillStyle = '#6b4226'; ctx.fillRect(hx - hs * 0.22, hy - hs * 0.65, hs * 0.44, hs * 0.65);
+    ctx.fillStyle = '#9fe0ff'; ctx.fillRect(hx - hs * 0.8, hy - hs * 0.95, hs * 0.4, hs * 0.35); ctx.fillRect(hx + hs * 0.4, hy - hs * 0.95, hs * 0.4, hs * 0.35);
+    // tree
+    const tx = W * 0.68, ty = groundY - U * 0.75;
+    ctx.fillStyle = '#7a4b2a'; ctx.fillRect(tx - U * 0.12, ty - U * 1.0, U * 0.24, U * 1.0);
+    ell(tx, ty - U * 1.4, U * 0.65, U * 0.7, '#3f9e3a');
+    // front field
+    ctx.fillStyle = '#7cc742';
+    ctx.beginPath(); ctx.moveTo(0, groundY + U * 0.5);
+    ctx.quadraticCurveTo(W * 0.5, groundY - U * 0.3, W, groundY + U * 0.6);
+    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.fill();
+    // flowers
+    for (let i = 0; i < 9; i++) {
+      const fx = ((i * 137.5) % 100) / 100 * W, fy = groundY + U * 0.9 + ((i * 61) % 100) / 100 * (H - groundY - U * 1.2);
+      if (puddles.some(p => !p.gone && Math.hypot(fx - p.x, fy - p.y) < p.r * 1.2)) continue;
+      const s = U * 0.1;
+      [0, 1, 2, 3, 4].forEach(k => { const a = k * Math.PI * 0.4; ell(fx + Math.cos(a) * s, fy + Math.sin(a) * s, s * 0.8, s * 0.8, i % 2 ? '#ffffff' : '#ffd1e6'); });
+      ell(fx, fy, s * 0.6, s * 0.6, '#ffd23f');
+    }
+  }
+
+  function drawPuddles(dt, now) {
+    puddles.forEach(p => {
+      p.grow = Math.min(1, p.grow + dt * 2.5);
+      if (p.gone) p.fade = Math.max(0, p.fade - dt * 1.2);
+      const k = p.grow * (p.gone ? p.fade : 1);
+      const wob = 1 + Math.sin(now / 400 + p.wob) * 0.03;
+      ell(p.x, p.y, p.r * k * wob, p.r * 0.42 * k, '#6e4320');
+      ell(p.x - p.r * 0.05, p.y - p.r * 0.03, p.r * 0.85 * k * wob, p.r * 0.32 * k, '#8a5a2b');
+      ell(p.x - p.r * 0.35, p.y - p.r * 0.12, p.r * 0.22 * k, p.r * 0.06 * k, 'rgba(255,255,255,0.45)');
+    });
+    puddles = puddles.filter(p => !(p.gone && p.fade <= 0));
+  }
+
+  function drawPig(now) {
+    let { x, y } = pig;
+    const u = U;
+    // shadow
+    const air = pig.jumping ? Math.sin(Math.PI * pig.t) : 0;
+    ell(pig.jumping ? pig.fx + (pig.tx - pig.fx) * pig.t : x, pig.jumping ? pig.fy + (pig.ty - pig.fy) * pig.t : y, u * 0.9 * (1 - air * 0.4), u * 0.22 * (1 - air * 0.4), 'rgba(40,60,20,0.25)');
+    const sq = pig.squash;
+    const sx = 1 + sq * 0.18, sy = 1 - sq * 0.15;
+    ctx.save(); ctx.translate(x, y); ctx.scale(sx, sy);
+    const legSpread = pig.jumping ? 0.45 : 0.3;
+    // tail
+    ctx.strokeStyle = '#e57fa8'; ctx.lineWidth = u * 0.09; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(u * 0.75, -u * 0.9);
+    for (let i = 0; i <= 20; i++) { const a = i / 20 * Math.PI * 3; ctx.lineTo(u * 0.95 + Math.cos(a) * u * 0.14 + i * u * 0.012, -u * 1.0 - Math.sin(a) * u * 0.14); }
+    ctx.stroke();
+    // legs + wellies
+    [-1, 1].forEach(s => {
+      ctx.fillStyle = '#f7a1c4'; ctx.fillRect(s * u * legSpread - u * 0.13, -u * 0.6, u * 0.26, u * 0.4);
+      ctx.fillStyle = '#e8364f';
+      ctx.beginPath(); ctx.roundRect(s * u * legSpread - u * 0.17, -u * 0.32, u * 0.34, u * 0.34, u * 0.06); ctx.fill();
+      ell(s * u * legSpread + s * u * 0.06, -u * 0.02, u * 0.22, u * 0.08, '#e8364f');
+    });
+    // raincoat body
+    ctx.fillStyle = '#ffcf26';
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.45, -u * 1.55); ctx.lineTo(u * 0.45, -u * 1.55);
+    ctx.quadraticCurveTo(u * 0.95, -u * 0.9, u * 0.85, -u * 0.5);
+    ctx.lineTo(-u * 0.85, -u * 0.5);
+    ctx.quadraticCurveTo(-u * 0.95, -u * 0.9, -u * 0.45, -u * 1.55);
+    ctx.fill();
+    ell(0, -u * 0.95, u * 0.05, u * 0.05, '#3a2a35'); ell(0, -u * 0.72, u * 0.05, u * 0.05, '#3a2a35');
+    // arms
+    const wave = pig.jumping ? -0.9 : Math.sin(now / 300) * 0.15;
+    [-1, 1].forEach(s => { ctx.save(); ctx.translate(s * u * 0.62, -u * 1.25); ctx.rotate(s * (0.5 + wave)); ell(0, u * 0.2, u * 0.13, u * 0.28, '#ffcf26'); ell(0, u * 0.46, u * 0.11, u * 0.1, '#f7a1c4'); ctx.restore(); });
+    // head
+    const hy = -u * 2.2;
+    [-1, 1].forEach(s => { ctx.fillStyle = '#f48fb8'; ctx.beginPath(); ctx.moveTo(s * u * 0.35, hy - u * 0.7); ctx.lineTo(s * u * 0.72, hy - u * 1.12); ctx.lineTo(s * u * 0.72, hy - u * 0.45); ctx.fill(); });
+    ell(0, hy, u * 0.85, u * 0.78, '#f7a1c4');
+    // cheeks
+    ell(-u * 0.55, hy + u * 0.2, u * 0.15, u * 0.11, '#f06a9b');
+    ell(u * 0.55, hy + u * 0.2, u * 0.15, u * 0.11, '#f06a9b');
+    // eyes
+    pig.blink -= 1 / 60; if (pig.blink < -3 - Math.random() * 3) pig.blink = 0.12;
+    [-1, 1].forEach(s => {
+      if (pig.blink > 0) { ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = u * 0.05; ctx.beginPath(); ctx.moveTo(s * u * 0.32 - u * 0.1, hy - u * 0.25); ctx.lineTo(s * u * 0.32 + u * 0.1, hy - u * 0.25); ctx.stroke(); }
+      else { ell(s * u * 0.32, hy - u * 0.25, u * 0.14, u * 0.16, '#ffffff'); ell(s * u * 0.32 + u * 0.02, hy - u * 0.22, u * 0.08, u * 0.1, '#3a2a35'); ell(s * u * 0.32 + u * 0.05, hy - u * 0.27, u * 0.025, u * 0.025, '#ffffff'); }
+    });
+    // snout
+    ell(0, hy + u * 0.12, u * 0.36, u * 0.26, '#f48fb8');
+    ell(-u * 0.12, hy + u * 0.12, u * 0.06, u * 0.09, '#c45583');
+    ell(u * 0.12, hy + u * 0.12, u * 0.06, u * 0.09, '#c45583');
+    // mouth
+    if (pig.happy > 0.2 || pig.jumping) {
+      ctx.fillStyle = '#c45583'; ctx.beginPath(); ctx.arc(0, hy + u * 0.45, u * 0.17, 0, Math.PI); ctx.fill();
+    } else {
+      ctx.strokeStyle = '#c45583'; ctx.lineWidth = u * 0.05; ctx.beginPath(); ctx.arc(0, hy + u * 0.36, u * 0.17, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+    }
+    // mud spots
+    pig.mud.forEach(m => ell(m.x * u, m.y * u, m.r * u, m.r * u * 0.85, '#8a5a2b'));
+    ctx.restore();
+  }
+
+  function drawFx(dt) {
+    drops.forEach(d => { d.vy += U * 14 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.life -= dt * 0.9; ell(d.x, d.y, d.r, d.r, '#7a4a22'); });
+    drops = drops.filter(d => d.life > 0 && d.y < H + 20);
+    confetti.forEach(c => { c.y += c.vy * dt; c.x += c.vx * dt; c.rot += dt * 5; c.life -= dt * 0.25; ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.rot); ctx.fillStyle = c.c; ctx.fillRect(-U * 0.08, -U * 0.04, U * 0.16, U * 0.08); ctx.restore(); });
+    confetti = confetti.filter(c => c.life > 0 && c.y < H + 20);
+  }
+
+  function drawHint(now) {
+    if (!started || pig.jumping) return;
+    const s = 1 + Math.sin(now / 250) * 0.05 * (reduce ? 0 : 1);
+    const w = U * 3.6 * s, h = U * 0.9 * s, x = W / 2, y = H - h / 2 - 14;
+    ctx.save(); ctx.globalAlpha = 0.92;
+    ctx.fillStyle = '#fffaf2'; ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, h * 0.3); ctx.fill();
+    ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = '#3a2a35'; ctx.font = `800 ${Math.round(h * 0.5)}px "Baloo 2", system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('SPACE', x, y + h * 0.04);
+    ctx.restore();
+  }
+
+  function drawScore() {
+    if (!started) return;
+    const r = U * 0.55, x = Math.max(16, 0) + r + 6, y = r + 14;
+    ell(x, y, r * 1.6, r, 'rgba(255,250,242,0.9)');
+    ell(x - r * 0.75, y, r * 0.5, r * 0.22, '#8a5a2b');
+    ctx.fillStyle = '#3a2a35'; ctx.font = `800 ${Math.round(r * 1.2)}px "Baloo 2", system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(score), x + r * 0.45, y + r * 0.08);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (pig.jumping) {
+      pig.t = Math.min(1, pig.t + dt / (reduce ? 0.45 : 0.6));
+      const t = pig.t;
+      pig.x = pig.fx + (pig.tx - pig.fx) * t;
+      pig.y = pig.fy + (pig.ty - pig.fy) * t - Math.sin(Math.PI * t) * U * 2.2 * pig.jh;
+      if (t >= 1) { pig.x = pig.tx; pig.y = pig.ty; land(); }
+    }
+    pig.squash = Math.max(0, pig.squash - dt * 4);
+    pig.happy = Math.max(0, pig.happy - dt);
+    drawSky(dt); drawLand(); drawPuddles(dt, now); drawPig(now); drawFx(dt); drawScore(); drawHint(now);
+    requestAnimationFrame(frame);
+  }
+
+  addEventListener('resize', resize);
+  resize(); fillPuddles();
+  requestAnimationFrame(frame);
+
+  function begin() {
+    started = true; audio();
+    document.getElementById('start').hidden = true;
+    oink(); say('Hello! Press space to jump in muddy puddles!');
+  }
+  document.getElementById('play').addEventListener('click', begin);
+})();
+</script>
