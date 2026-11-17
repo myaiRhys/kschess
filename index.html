@@ -91,7 +91,7 @@
   // ---------- world ----------
   const pig = { x: 0, y: 0, fx: 0, fy: 0, tx: 0, ty: 0, t: 1, jumping: false, squash: 0, blink: 0, happy: 0, mud: [], target: null };
   let puddles = [], drops = [], confetti = [], clouds = [], score = 0, rainbow = 0, started = false, sunSpin = 0;
-  let slide = null, hopsSinceSlide = 0;
+  let slide = null, hopsSinceSlide = 0, mode = 'puddles', climb = null, fade = 0, climbPending = false;
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -103,7 +103,7 @@
       slide = { lx, baseY, topY, p0: [lx + U * 0.35, topY], p1: [lx + U * 2.3, topY + U * 0.2], p2: [lx + U * 3.3, baseY - U * 0.35],
         px: lx + U * 4.3, py: baseY + U * 0.45, pr: U * 1.2, right: lx + U * 5.6 }; }
     if (!pig.x) { pig.x = W * 0.66; pig.y = H * 0.8; }
-    pig.x = Math.min(Math.max(pig.x, U), W - U); pig.y = Math.min(Math.max(pig.y, groundY + U), H - U * 0.3);
+    if (mode !== 'climb') { pig.x = Math.min(Math.max(pig.x, U), W - U); pig.y = Math.min(Math.max(pig.y, groundY + U), H - U * 0.3); }
     puddles.forEach(p => { p.x = Math.min(p.x, W - U); p.y = Math.min(Math.max(p.y, groundY + U * 0.8), H - U * 0.4); });
     if (!clouds.length) for (let i = 0; i < 4; i++) clouds.push({ x: Math.random() * W, y: H * (0.08 + Math.random() * 0.2), s: 0.7 + Math.random() * 0.6, v: 6 + Math.random() * 10 });
   }
@@ -122,7 +122,7 @@
   // ---------- input ----------
   function hitPig(x, y) { return Math.hypot(x - pig.x, y - (pig.y - U * 1.5)) < U * 1.3; }
   function onTap(e) {
-    if (!started) return;
+    if (!started || mode === 'climb' || climbPending) return;
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     audio();
@@ -139,7 +139,7 @@
   function press() {
     audio();
     if (!started) { begin(); return; }
-    if (pig.jumping || pig.riding) return;
+    if (pig.jumping || pig.riding || climbPending || mode === 'climb') return;
     if (hopsSinceSlide >= 2) { startRide(); return; }
     hopsSinceSlide++;
     const live = puddles.filter(p => !p.gone && p.grow > 0.5);
@@ -148,7 +148,10 @@
     jumpTo(live[0].x, live[0].y, live[0], 1);
   }
   addEventListener('keydown', e => {
-    if (e.code === 'Space' || e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (!e.repeat) press(); }
+    const dirs = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    const isSpace = e.code === 'Space' || e.key === ' ' || e.key === 'Enter';
+    if (mode === 'climb' && (dirs[e.key] || isSpace)) { e.preventDefault(); if (!e.repeat) { audio(); climbKey(dirs[e.key] || 'up'); } return; }
+    if (isSpace || dirs[e.key]) { e.preventDefault(); if (!e.repeat) press(); }
   });
 
   function jumpTo(x, y, target, height) {
@@ -200,6 +203,147 @@
       say(word + '! Splash!');
     }
     setTimeout(fillPuddles, 700);
+    if (score % 10 === 0) { climbPending = true; setTimeout(startClimb, 3300); }
+  }
+
+  // ---------- giant jungle gym ----------
+  const BEAMS = ['#ff6b6b', '#ffb03b', '#ffd93d', '#6bcb77', '#4d96ff', '#c77dff'];
+  const nodeX = c => climb.x0 + c * climb.cw;
+  const nodeY = r => -r * climb.rh;
+  function startClimb() {
+    climbPending = false; mode = 'climb'; fade = 1;
+    const rows = 12, cols = 5, cw = Math.min(U * 2.4, (W - U * 4) / (cols - 1)), rh = U * 2.2;
+    const ups = []; let prev = 2;
+    for (let r = 0; r < rows - 1; r++) {
+      const set = new Set();
+      if (r < 2) { set.add(prev); let o; do { o = Math.floor(Math.random() * cols); } while (o === prev); set.add(o); prev = o; }
+      else { let c; do { c = prev + (Math.random() < 0.5 ? -1 : 1) * (1 + Math.floor(Math.random() * 2)); } while (c === prev || c < 0 || c >= cols); set.add(c); prev = c; }
+      ups.push(set);
+    }
+    const clouds = [];
+    for (let i = 0; i < 9; i++) clouds.push({ x: Math.random() * W, y: -Math.random() * rows * rh - H * 0.2, s: 0.6 + Math.random() * 0.8 });
+    climb = { rows, cols, cw, rh, x0: W / 2 - cw * (cols - 1) / 2, ups, r: 0, c: 2, moving: false, t: 0, won: false, wrongUps: 0, clouds, cam: 0 };
+    pig.size = 0.6; pig.pose = null; pig.jumping = false; pig.riding = false; pig.x = nodeX(2); pig.y = 0; pig.shake = 0;
+    climb.cam = Math.min(pig.y - H * 0.62, U * 1.6 - H);
+    say('Ten puddles! Now climb the giant jungle gym! Use the arrows!');
+  }
+  function climbKey(dir) {
+    const k = climb; if (!k || k.moving || k.won) return;
+    let r = k.r, c = k.c;
+    if (dir === 'up') { if (r < k.rows - 1 && k.ups[r].has(c)) r++; }
+    else if (dir === 'down') { if (r > 0 && k.ups[r - 1].has(c)) r--; }
+    else if (dir === 'left') { if (c > 0) c--; }
+    else if (dir === 'right') { if (c < k.cols - 1) c++; }
+    if (r === k.r && c === k.c) {
+      pig.shake = 1; tone('sine', 220, 150, 0.2, 0.25);
+      if (dir === 'up' && ++k.wrongUps >= 2) {
+        k.wrongUps = 0;
+        const ladders = [...k.ups[k.r]].sort((a, b) => Math.abs(a - k.c) - Math.abs(b - k.c));
+        say(ladders[0] < k.c ? 'Go left!' : 'Go right!');
+      }
+      return;
+    }
+    k.wrongUps = 0; k.moving = true; k.t = 0; k.fx = pig.x; k.fy = pig.y; k.r = r; k.c = c; k.dir = dir;
+    if (dir === 'up' || dir === 'down') { pig.pose = 'climb'; tone('triangle', 400 + r * 60, 520 + r * 60, 0.25, 0.2); }
+    else tone('sine', 520, 640, 0.1, 0.15);
+  }
+  function updateClimb(dt) {
+    const k = climb;
+    pig.shake = Math.max(0, (pig.shake || 0) - dt * 3);
+    if (k.moving) {
+      const vert = k.dir === 'up' || k.dir === 'down';
+      k.t = Math.min(1, k.t + dt / (vert ? 0.45 : 0.28));
+      const tx = nodeX(k.c), ty = nodeY(k.r);
+      pig.x = k.fx + (tx - k.fx) * k.t;
+      pig.y = k.fy + (ty - k.fy) * k.t - (vert ? 0 : Math.sin(Math.PI * k.t) * U * 0.35);
+      if (k.t >= 1) {
+        k.moving = false; pig.pose = null; pig.squash = 0.6;
+        if (k.dir === 'up') {
+          if (k.r === k.rows - 1) winClimb();
+          else say(k.r <= 10 ? WORDS[k.r - 1] : String(k.r));
+        }
+      }
+    }
+    const target = Math.min(pig.y - H * 0.62, U * 1.6 - H);
+    k.cam += (target - k.cam) * Math.min(1, dt * 4);
+  }
+  function winClimb() {
+    climb.won = true; pig.happy = 3; tada(); rainbow = 1;
+    say('You did it! The top of the giant jungle gym!');
+    for (let i = 0; i < 90; i++) confetti.push({ x: Math.random() * W, y: -Math.random() * H * 0.5, vy: U * (1.5 + Math.random() * 2), vx: (Math.random() - 0.5) * U, rot: Math.random() * 6, c: BEAMS[i % 6], life: 1 });
+    setTimeout(endClimb, 6000);
+  }
+  function endClimb() {
+    mode = 'puddles'; climb = null; fade = 1; pig.size = 1; pig.pose = null; pig.shake = 0;
+    pig.x = W * 0.66; pig.y = H * 0.8; hopsSinceSlide = 0;
+    say('Back to the muddy puddles!'); fillPuddles();
+  }
+  function star(x, y, r, rot, fill) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) { const a = rot + i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+  }
+  function drawClimb(now) {
+    const k = climb, u = U, top = nodeY(k.rows - 1);
+    ctx.save(); ctx.translate(0, -k.cam);
+    k.clouds.forEach(c => { const s = u * c.s; ell(c.x, c.y, s * 1.1, s * 0.6, '#ffffff'); ell(c.x - s * 0.9, c.y + s * 0.15, s * 0.7, s * 0.45, '#ffffff'); ell(c.x + s * 0.9, c.y + s * 0.15, s * 0.75, s * 0.45, '#ffffff'); });
+    ctx.fillStyle = '#7cc742'; ctx.fillRect(0, u * 0.15, W, H * 3);
+    const left = nodeX(0) - k.cw * 0.6, right = nodeX(k.cols - 1) + k.cw * 0.6;
+    ctx.lineCap = 'round';
+    // tower posts
+    ctx.strokeStyle = '#4a5a8a'; ctx.lineWidth = u * 0.22;
+    [left, right].forEach(x => { ctx.beginPath(); ctx.moveTo(x, u * 0.2); ctx.lineTo(x, top); ctx.stroke(); });
+    // ladders
+    k.ups.forEach((set, r) => set.forEach(c => {
+      const x = nodeX(c), y1 = nodeY(r), y2 = nodeY(r + 1);
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = u * 0.1;
+      [-1, 1].forEach(sd => { ctx.beginPath(); ctx.moveTo(x + sd * u * 0.32, y1); ctx.lineTo(x + sd * u * 0.32, y2); ctx.stroke(); });
+      ctx.lineWidth = u * 0.07;
+      for (let i = 1; i < 5; i++) { const y = y1 + (y2 - y1) * i / 5; ctx.beginPath(); ctx.moveTo(x - u * 0.32, y); ctx.lineTo(x + u * 0.32, y); ctx.stroke(); }
+    }));
+    // floors
+    for (let r = 0; r < k.rows; r++) {
+      const y = nodeY(r) + u * 0.1;
+      ctx.strokeStyle = BEAMS[r % BEAMS.length]; ctx.lineWidth = u * 0.2;
+      ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+    }
+    // bouncing arrows over ladders on this floor
+    if (!k.moving && !k.won) {
+      const b = Math.sin(now / 200) * u * 0.15;
+      k.ups[k.r] && k.ups[k.r].forEach(c => {
+        const x = nodeX(c), y = nodeY(k.r) - k.rh * 0.55 + b;
+        ctx.fillStyle = '#ffd23f'; ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(x, y - u * 0.4); ctx.lineTo(x + u * 0.35, y); ctx.lineTo(x + u * 0.14, y); ctx.lineTo(x + u * 0.14, y + u * 0.35); ctx.lineTo(x - u * 0.14, y + u * 0.35); ctx.lineTo(x - u * 0.14, y); ctx.lineTo(x - u * 0.35, y); ctx.closePath(); ctx.fill(); ctx.stroke();
+      });
+    }
+    // flag and star on top
+    const fx = W / 2;
+    ctx.strokeStyle = '#4a5a8a'; ctx.lineWidth = u * 0.1; ctx.beginPath(); ctx.moveTo(fx, top); ctx.lineTo(fx, top - u * 2.4); ctx.stroke();
+    ctx.fillStyle = '#e8364f'; ctx.beginPath(); ctx.moveTo(fx, top - u * 2.4); ctx.lineTo(fx + u * 1.1, top - u * 2.05); ctx.lineTo(fx, top - u * 1.7); ctx.fill();
+    star(fx, top - u * 3.3, u * (0.6 + Math.sin(now / 300) * 0.06), now / 1500, '#ffd23f');
+    drawPig(now);
+    ctx.restore();
+  }
+  function drawKeys() {
+    const k = climb; if (!k || k.won) return;
+    const ks = U * 0.75, gap = ks * 0.12, cx = W - ks * 2 - 20, by = H - ks / 2 - 16;
+    const can = {
+      up: k.r < k.rows - 1 && k.ups[k.r].has(k.c), down: k.r > 0 && k.ups[k.r - 1].has(k.c),
+      left: k.c > 0, right: k.c < k.cols - 1,
+    };
+    const keys = [['up', cx, by - ks - gap, -Math.PI / 2], ['left', cx - ks - gap, by, Math.PI], ['down', cx, by, Math.PI / 2], ['right', cx + ks + gap, by, 0]];
+    keys.forEach(([d, x, y, a]) => {
+      ctx.fillStyle = can[d] ? '#f7a1c4' : 'rgba(255,250,242,0.6)';
+      ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = can[d] ? 4 : 2;
+      ctx.beginPath(); ctx.roundRect(x - ks / 2, y - ks / 2, ks, ks, ks * 0.2); ctx.fill(); ctx.stroke();
+      ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.fillStyle = can[d] ? '#3a2a35' : 'rgba(58,42,53,0.3)';
+      ctx.beginPath(); ctx.moveTo(ks * 0.28, 0); ctx.lineTo(-ks * 0.18, -ks * 0.24); ctx.lineTo(-ks * 0.18, ks * 0.24); ctx.fill(); ctx.restore();
+    });
+  }
+  function fadeStep(dt) {
+    if (fade <= 0) return;
+    fade = Math.max(0, fade - dt * 1.4);
+    ctx.fillStyle = `rgba(255,255,255,${fade})`; ctx.fillRect(0, 0, W, H);
   }
 
   // ---------- drawing ----------
@@ -300,10 +444,11 @@
 
   function drawPig(now) {
     let { x, y } = pig;
-    const u = U;
+    x += Math.sin(now / 25) * (pig.shake || 0) * U * 0.12;
+    const u = U * (pig.size || 1);
     // shadow
     const air = pig.jumping ? Math.sin(Math.PI * pig.t) : 0;
-    if (!pig.riding) ell(pig.jumping ? pig.fx + (pig.tx - pig.fx) * pig.t : x, pig.jumping ? pig.fy + (pig.ty - pig.fy) * pig.t : y, u * 0.9 * (1 - air * 0.4), u * 0.22 * (1 - air * 0.4), 'rgba(40,60,20,0.25)');
+    if (!pig.riding && mode !== 'climb') ell(pig.jumping ? pig.fx + (pig.tx - pig.fx) * pig.t : x, pig.jumping ? pig.fy + (pig.ty - pig.fy) * pig.t : y, u * 0.9 * (1 - air * 0.4), u * 0.22 * (1 - air * 0.4), 'rgba(40,60,20,0.25)');
     const sq = pig.squash;
     const sx = 1 + sq * 0.18, sy = 1 - sq * 0.15;
     ctx.save(); ctx.translate(x, y); ctx.scale(sx, sy);
@@ -331,7 +476,7 @@
     ctx.fill();
     ell(0, -u * 0.95, u * 0.05, u * 0.05, '#3a2a35'); ell(0, -u * 0.72, u * 0.05, u * 0.05, '#3a2a35');
     // arms
-    const wave = (pig.jumping || pig.riding) ? -0.9 : Math.sin(now / 300) * 0.15;
+    const wave = (pig.jumping || pig.riding || pig.pose === 'climb') ? -0.9 : Math.sin(now / 300) * 0.15;
     [-1, 1].forEach(s => { ctx.save(); ctx.translate(s * u * 0.62, -u * 1.25); ctx.rotate(s * (0.5 + wave)); ell(0, u * 0.2, u * 0.13, u * 0.28, '#ffcf26'); ell(0, u * 0.46, u * 0.11, u * 0.1, '#f7a1c4'); ctx.restore(); });
     // head
     const hy = -u * 2.2;
@@ -393,6 +538,11 @@
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (mode === 'climb') {
+      updateClimb(dt); pig.squash = Math.max(0, pig.squash - dt * 4); pig.happy = Math.max(0, pig.happy - dt);
+      drawSky(dt); drawClimb(now); drawFx(dt); drawScore(); drawKeys(); fadeStep(dt);
+      requestAnimationFrame(frame); return;
+    }
     if (pig.jumping) {
       pig.t = Math.min(1, pig.t + dt / (reduce ? 0.45 : 0.6));
       const t = pig.t;
@@ -403,7 +553,7 @@
     if (pig.riding) updateRide(dt);
     pig.squash = Math.max(0, pig.squash - dt * 4);
     pig.happy = Math.max(0, pig.happy - dt);
-    drawSky(dt); drawLand(); drawSlide(); drawPuddles(dt, now); drawPig(now); drawFx(dt); drawScore(); drawHint(now);
+    drawSky(dt); drawLand(); drawSlide(); drawPuddles(dt, now); drawPig(now); drawFx(dt); drawScore(); drawHint(now); fadeStep(dt);
     requestAnimationFrame(frame);
   }
 
@@ -415,6 +565,7 @@
     started = true; audio();
     document.getElementById('start').hidden = true;
     oink(); say('Hello! Press space to jump in muddy puddles!');
+    if (location.hash === '#climb') setTimeout(startClimb, 800);
   }
   document.getElementById('play').addEventListener('click', begin);
 })();
