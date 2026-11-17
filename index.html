@@ -91,6 +91,7 @@
   // ---------- world ----------
   const pig = { x: 0, y: 0, fx: 0, fy: 0, tx: 0, ty: 0, t: 1, jumping: false, squash: 0, blink: 0, happy: 0, mud: [], target: null };
   let puddles = [], drops = [], confetti = [], clouds = [], score = 0, rainbow = 0, started = false, sunSpin = 0;
+  let slide = null, hopsSinceSlide = 0;
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -98,7 +99,10 @@
     cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     U = Math.max(34, Math.min(W / 9, H / 7.5, 80));
     groundY = H * 0.58;
-    if (!pig.x) { pig.x = W * 0.5; pig.y = H * 0.8; }
+    { const lx = Math.max(U * 1.4, W * 0.07), baseY = groundY + U * 1.7, topY = baseY - U * 3.1;
+      slide = { lx, baseY, topY, p0: [lx + U * 0.35, topY], p1: [lx + U * 2.3, topY + U * 0.2], p2: [lx + U * 3.3, baseY - U * 0.35],
+        px: lx + U * 4.3, py: baseY + U * 0.45, pr: U * 1.2, right: lx + U * 5.6 }; }
+    if (!pig.x) { pig.x = W * 0.66; pig.y = H * 0.8; }
     pig.x = Math.min(Math.max(pig.x, U), W - U); pig.y = Math.min(Math.max(pig.y, groundY + U), H - U * 0.3);
     puddles.forEach(p => { p.x = Math.min(p.x, W - U); p.y = Math.min(Math.max(p.y, groundY + U * 0.8), H - U * 0.4); });
     if (!clouds.length) for (let i = 0; i < 4; i++) clouds.push({ x: Math.random() * W, y: H * (0.08 + Math.random() * 0.2), s: 0.7 + Math.random() * 0.6, v: 6 + Math.random() * 10 });
@@ -106,7 +110,7 @@
 
   function newPuddle() {
     for (let tries = 0; tries < 40; tries++) {
-      const x = U * 1.2 + Math.random() * (W - U * 2.4);
+      const xMin = Math.min(slide.right + U * 1.2, W * 0.6), x = xMin + Math.random() * (W - U * 1.2 - xMin);
       const y = groundY + U * 1.1 + Math.random() * (H - groundY - U * 1.6);
       const ok = Math.hypot(x - pig.x, (y - pig.y) * 1.6) > U * 2.2 && puddles.every(p => Math.hypot(x - p.x, (y - p.y) * 1.6) > U * 2.6);
       if (ok) return { x, y, r: U * (1.1 + Math.random() * 0.4), grow: 0, gone: false, fade: 1, wob: Math.random() * 6 };
@@ -122,7 +126,7 @@
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     audio();
-    if (pig.jumping) return;
+    if (pig.jumping || pig.riding) return;
     if (hitPig(x, y)) { oink(); say('Oink oink!'); pig.happy = 1; jumpTo(pig.x, pig.y, null, 0.7); return; }
     const p = puddles.find(p => !p.gone && Math.hypot((x - p.x) / p.r, (y - p.y) / (p.r * 0.45)) < 1.35);
     if (p) { jumpTo(p.x, p.y, p, 1); return; }
@@ -135,7 +139,9 @@
   function press() {
     audio();
     if (!started) { begin(); return; }
-    if (pig.jumping) return;
+    if (pig.jumping || pig.riding) return;
+    if (hopsSinceSlide >= 2) { startRide(); return; }
+    hopsSinceSlide++;
     const live = puddles.filter(p => !p.gone && p.grow > 0.5);
     if (!live.length) { oink(); pig.happy = 1; jumpTo(pig.x, pig.y, null, 0.7); return; }
     live.sort((a, b) => Math.hypot(a.x - pig.x, a.y - pig.y) - Math.hypot(b.x - pig.x, b.y - pig.y));
@@ -150,6 +156,27 @@
     boing();
   }
 
+  function startRide() {
+    pig.riding = true; pig.rt = 0; pig.rx0 = pig.x; pig.ry0 = pig.y; pig.saidWhee = false; pig.stepCount = 0; hopsSinceSlide = 0; boing();
+  }
+  function bez(t) {
+    const a = slide.p0, b = slide.p1, c = slide.p2, m = 1 - t;
+    return [m * m * a[0] + 2 * m * t * b[0] + t * t * c[0], m * m * a[1] + 2 * m * t * b[1] + t * t * c[1]];
+  }
+  function updateRide(dt) {
+    const sl = slide; pig.rt = Math.min(1, pig.rt + dt / 3.2); const t = pig.rt, ladX = sl.lx + U * 0.05;
+    if (t < 0.18) { const k = t / 0.18; pig.x = pig.rx0 + (ladX - pig.rx0) * k; pig.y = pig.ry0 + (sl.baseY - pig.ry0) * k - Math.sin(Math.PI * k) * U * 1.2; pig.pose = 'jump'; }
+    else if (t < 0.5) {
+      const k = (t - 0.18) / 0.32; pig.x = ladX; pig.y = sl.baseY + (sl.topY - sl.baseY) * k + Math.sin(k * Math.PI * 12) * U * 0.04; pig.pose = 'climb';
+      const step = Math.floor(k * 6); if (step > pig.stepCount) { pig.stepCount = step; tone('square', 400 + step * 90, 400 + step * 90, 0.07, 0.1); }
+    } else if (t < 0.85) {
+      const k = (t - 0.5) / 0.35;
+      if (!pig.saidWhee) { pig.saidWhee = true; say('Wheeeee!'); tone('sine', 1300, 250, 1.1, 0.25); }
+      const [x, y] = bez(k * k); pig.x = x; pig.y = y; pig.pose = 'slide';
+    } else { const k = (t - 0.85) / 0.15, [ex, ey] = sl.p2; pig.x = ex + (sl.px - ex) * k; pig.y = ey + (sl.py - ey) * k - Math.sin(Math.PI * k) * U * 0.7; pig.pose = 'jump'; }
+    if (t >= 1) { pig.riding = false; pig.pose = null; pig.x = sl.px; pig.y = sl.py; pig.target = { x: sl.px, y: sl.py, big: true }; land(); }
+  }
+
   function land() {
     pig.jumping = false; pig.squash = 1;
     const p = pig.target;
@@ -158,8 +185,8 @@
     score++;
     splashSound();
     pig.happy = 1.4;
-    for (let i = 0; i < 26; i++) {
-      const a = Math.PI + Math.random() * Math.PI, sp = U * (3 + Math.random() * 5);
+    for (let i = 0; i < (p.big ? 55 : 26); i++) {
+      const a = Math.PI + Math.random() * Math.PI, sp = U * (3 + Math.random() * 5) * (p.big ? 1.4 : 1);
       drops.push({ x: p.x, y: p.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 1.3, r: U * (0.06 + Math.random() * 0.1), life: 1 });
     }
     if (pig.mud.length < 14) {
@@ -241,6 +268,23 @@
     }
   }
 
+  function drawSlide() {
+    const sl = slide, u = U, a = sl.p0, b = sl.p1, c = sl.p2;
+    ell(sl.px, sl.py, sl.pr, sl.pr * 0.42, '#6e4320');
+    ell(sl.px - sl.pr * 0.05, sl.py - sl.pr * 0.03, sl.pr * 0.85, sl.pr * 0.32, '#8a5a2b');
+    ell(sl.px - sl.pr * 0.35, sl.py - sl.pr * 0.12, sl.pr * 0.22, sl.pr * 0.06, 'rgba(255,255,255,0.45)');
+    const l1 = sl.lx - u * 0.35, l2 = sl.lx + u * 0.45;
+    ctx.lineCap = 'round'; ctx.strokeStyle = '#3b7dd8';
+    ctx.lineWidth = u * 0.12; ctx.beginPath(); ctx.moveTo(c[0] - u * 0.5, c[1] + u * 0.1); ctx.lineTo(c[0] - u * 0.5, sl.baseY); ctx.stroke();
+    ctx.lineWidth = u * 0.14;
+    [l1, l2].forEach(x => { ctx.beginPath(); ctx.moveTo(x, sl.baseY); ctx.lineTo(x, sl.topY - u * 0.9); ctx.stroke(); });
+    ctx.lineWidth = u * 0.09;
+    for (let i = 1; i <= 6; i++) { const y = sl.baseY - (sl.baseY - sl.topY) * i / 6.4; ctx.beginPath(); ctx.moveTo(l1, y); ctx.lineTo(l2, y); ctx.stroke(); }
+    ctx.fillStyle = '#ffcf26'; ctx.fillRect(l1 - u * 0.1, sl.topY - u * 0.05, (l2 - l1) + u * 0.2, u * 0.2);
+    ctx.strokeStyle = '#a81f33'; ctx.lineWidth = u * 0.42; ctx.beginPath(); ctx.moveTo(a[0], a[1] + u * 0.1); ctx.quadraticCurveTo(b[0], b[1] + u * 0.1, c[0], c[1] + u * 0.1); ctx.stroke();
+    ctx.strokeStyle = '#e8364f'; ctx.lineWidth = u * 0.28; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.quadraticCurveTo(b[0], b[1], c[0], c[1]); ctx.stroke();
+  }
+
   function drawPuddles(dt, now) {
     puddles.forEach(p => {
       p.grow = Math.min(1, p.grow + dt * 2.5);
@@ -259,10 +303,11 @@
     const u = U;
     // shadow
     const air = pig.jumping ? Math.sin(Math.PI * pig.t) : 0;
-    ell(pig.jumping ? pig.fx + (pig.tx - pig.fx) * pig.t : x, pig.jumping ? pig.fy + (pig.ty - pig.fy) * pig.t : y, u * 0.9 * (1 - air * 0.4), u * 0.22 * (1 - air * 0.4), 'rgba(40,60,20,0.25)');
+    if (!pig.riding) ell(pig.jumping ? pig.fx + (pig.tx - pig.fx) * pig.t : x, pig.jumping ? pig.fy + (pig.ty - pig.fy) * pig.t : y, u * 0.9 * (1 - air * 0.4), u * 0.22 * (1 - air * 0.4), 'rgba(40,60,20,0.25)');
     const sq = pig.squash;
     const sx = 1 + sq * 0.18, sy = 1 - sq * 0.15;
     ctx.save(); ctx.translate(x, y); ctx.scale(sx, sy);
+    if (pig.pose === 'slide') ctx.rotate(0.3);
     const legSpread = pig.jumping ? 0.45 : 0.3;
     // tail
     ctx.strokeStyle = '#e57fa8'; ctx.lineWidth = u * 0.09; ctx.lineCap = 'round';
@@ -286,7 +331,7 @@
     ctx.fill();
     ell(0, -u * 0.95, u * 0.05, u * 0.05, '#3a2a35'); ell(0, -u * 0.72, u * 0.05, u * 0.05, '#3a2a35');
     // arms
-    const wave = pig.jumping ? -0.9 : Math.sin(now / 300) * 0.15;
+    const wave = (pig.jumping || pig.riding) ? -0.9 : Math.sin(now / 300) * 0.15;
     [-1, 1].forEach(s => { ctx.save(); ctx.translate(s * u * 0.62, -u * 1.25); ctx.rotate(s * (0.5 + wave)); ell(0, u * 0.2, u * 0.13, u * 0.28, '#ffcf26'); ell(0, u * 0.46, u * 0.11, u * 0.1, '#f7a1c4'); ctx.restore(); });
     // head
     const hy = -u * 2.2;
@@ -306,7 +351,7 @@
     ell(-u * 0.12, hy + u * 0.12, u * 0.06, u * 0.09, '#c45583');
     ell(u * 0.12, hy + u * 0.12, u * 0.06, u * 0.09, '#c45583');
     // mouth
-    if (pig.happy > 0.2 || pig.jumping) {
+    if (pig.happy > 0.2 || pig.jumping || pig.riding) {
       ctx.fillStyle = '#c45583'; ctx.beginPath(); ctx.arc(0, hy + u * 0.45, u * 0.17, 0, Math.PI); ctx.fill();
     } else {
       ctx.strokeStyle = '#c45583'; ctx.lineWidth = u * 0.05; ctx.beginPath(); ctx.arc(0, hy + u * 0.36, u * 0.17, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
@@ -324,14 +369,15 @@
   }
 
   function drawHint(now) {
-    if (!started || pig.jumping) return;
+    if (!started || pig.jumping || pig.riding) return;
     const s = 1 + Math.sin(now / 250) * 0.05 * (reduce ? 0 : 1);
-    const w = U * 3.6 * s, h = U * 0.9 * s, x = W / 2, y = H - h / 2 - 14;
+    const label = hopsSinceSlide >= 2 ? 'SPACE = slide!' : 'SPACE';
+    const w = U * (hopsSinceSlide >= 2 ? 5.6 : 3.6) * s, h = U * 0.9 * s, x = W / 2, y = H - h / 2 - 14;
     ctx.save(); ctx.globalAlpha = 0.92;
     ctx.fillStyle = '#fffaf2'; ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, h * 0.3); ctx.fill();
     ctx.strokeStyle = '#3a2a35'; ctx.lineWidth = 3; ctx.stroke();
     ctx.fillStyle = '#3a2a35'; ctx.font = `800 ${Math.round(h * 0.5)}px "Baloo 2", system-ui, sans-serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('SPACE', x, y + h * 0.04);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, x, y + h * 0.04);
     ctx.restore();
   }
 
@@ -354,9 +400,10 @@
       pig.y = pig.fy + (pig.ty - pig.fy) * t - Math.sin(Math.PI * t) * U * 2.2 * pig.jh;
       if (t >= 1) { pig.x = pig.tx; pig.y = pig.ty; land(); }
     }
+    if (pig.riding) updateRide(dt);
     pig.squash = Math.max(0, pig.squash - dt * 4);
     pig.happy = Math.max(0, pig.happy - dt);
-    drawSky(dt); drawLand(); drawPuddles(dt, now); drawPig(now); drawFx(dt); drawScore(); drawHint(now);
+    drawSky(dt); drawLand(); drawSlide(); drawPuddles(dt, now); drawPig(now); drawFx(dt); drawScore(); drawHint(now);
     requestAnimationFrame(frame);
   }
 
